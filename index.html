@@ -46,11 +46,25 @@ header{display:flex;justify-content:space-between;align-items:center;gap:16px;ma
 .modal-actions{display:flex;justify-content:space-between;gap:10px;margin-top:20px}.right-actions{display:flex;gap:8px}.btn{border:0;border-radius:10px;padding:10px 15px;font-weight:700;font-size:13px}.btn.primary{background:var(--blue);color:#fff}.btn.secondary{background:#f0f2f7;color:var(--ink)}.btn.danger{background:#fff0f0;color:#bd5151}
 @media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{order:2}}
 @media(max-width:600px){.app{margin:18px auto;padding:0 10px}header{align-items:flex-start;flex-direction:column}.calendar{padding:10px}.weekdays,.days{gap:3px}.day{min-height:90px;padding:4px;border-radius:8px}.day.today{padding:3px}.event{padding:4px 5px;font-size:9px}.event-check{position:static;display:inline-block;width:12px;height:12px;margin:3px 0 0}.event-delete{display:none}.event-type{font-size:8px}.day-top{font-size:10px}.month-title{font-size:18px}.nav button{padding:7px 9px}}
+
+.syncbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-8px 0 18px;padding:12px 14px;background:#fff;border:1px solid var(--line);border-radius:14px}
+.syncbar input{min-width:0;width:190px;border:1px solid var(--line);border-radius:9px;padding:8px 10px;font:inherit;font-size:12px}
+.syncbar button{border:0;border-radius:9px;padding:8px 12px;font-size:12px;font-weight:700;background:#edf1fc;color:#3859a7}
+.syncbar button.primary{background:var(--blue);color:#fff}.sync-status{font-size:11px;color:var(--muted);flex:1 1 100%}
+@media(max-width:600px){.syncbar input{flex:1;width:130px}.syncbar{gap:6px}}
 </style>
 </head>
 <body>
 <div class="app">
 <header><div class="brand">CNN<span>LENDAR</span></div><div class="header-note">A little space to keep your days in order.</div></header>
+<div class="syncbar" id="syncbar">
+  <input id="authEmail" type="email" autocomplete="email" placeholder="Email">
+  <input id="authPassword" type="password" autocomplete="current-password" placeholder="Password">
+  <button class="primary" id="signInBtn" type="button">Log in</button>
+  <button id="signUpBtn" type="button">Create account</button>
+  <button id="signOutBtn" type="button" hidden>Log out</button>
+  <div class="sync-status" id="syncStatus">Not synced yet · Log in with the same account on each device.</div>
+</div>
 <div class="layout">
 <main class="panel calendar">
   <div class="cal-head"><div class="month-title" id="monthTitle"></div><div class="nav"><button id="prev" aria-label="Previous month">‹</button><button class="today-btn" id="todayBtn">Today</button><button id="next" aria-label="Next month">›</button></div></div>
@@ -76,13 +90,41 @@ header{display:flex;justify-content:space-between;align-items:center;gap:16px;ma
 (()=> {
 'use strict';
 const STORE='cnnlendar-items-v2';
+const SUPABASE_URL='https://dhzgrxubwynbpdyxcduj.supabase.co';
+const SUPABASE_KEY='sb_publishable_32i9APU531HVGJFpFzwNig_OXww1QHO';
+const supabase=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+let currentUser=null, realtimeChannel=null, applyingRemote=false;
 const typeNames={HW:'HOMEWORK',PRACTICE:'PRACTICE',PROJECT:'PROJECT',EXAM:'EXAM',EVENT:'EVENT'};
 const classNames={HW:'hw',PRACTICE:'practice',PROJECT:'project',EXAM:'exam',EVENT:'event-type-card'};
 const checkable=new Set(['HW','PRACTICE','PROJECT']);
 let items=loadItems(), view=new Date(), selectedDate='', editingId=null;
 const $=id=>document.getElementById(id);
 function loadItems(){try{const v=JSON.parse(localStorage.getItem(STORE)||'{}');return v&&typeof v==='object'?v:{}}catch(e){return {}}}
-function save(){localStorage.setItem(STORE,JSON.stringify(items));render()}
+function save(){localStorage.setItem(STORE,JSON.stringify(items));render();if(currentUser&&!applyingRemote)pushCloud()}
+function setStatus(message){$('syncStatus').textContent=message}
+async function pushCloud(){
+ try{setStatus('Saving to your account…');const {error}=await supabase.from('user_calendars').upsert({user_id:currentUser.id,data:items,updated_at:new Date().toISOString()},{onConflict:'user_id'});if(error)throw error;setStatus('Synced · Your calendar is saved to the cloud.')}
+ catch(e){setStatus('Sync error: '+e.message+' · Check the Supabase table setup.')}
+}
+async function syncCloud(user){
+ currentUser=user;
+ $('authEmail').hidden=true;$('authPassword').hidden=true;$('signInBtn').hidden=true;$('signUpBtn').hidden=true;$('signOutBtn').hidden=false;
+ setStatus('Loading your calendar…');
+ try{
+  const {data,error}=await supabase.from('user_calendars').select('data').eq('user_id',user.id).maybeSingle();
+  if(error)throw error;
+  if(data&&data.data&&typeof data.data==='object'){applyingRemote=true;items=data.data;localStorage.setItem(STORE,JSON.stringify(items));applyingRemote=false;render();setStatus('Synced · Signed in as '+user.email)}
+  else {await pushCloud();setStatus('Your existing calendar has been copied to the cloud.')}
+  if(realtimeChannel)await supabase.removeChannel(realtimeChannel);
+  realtimeChannel=supabase.channel('calendar-'+user.id).on('postgres_changes',{event:'UPDATE',schema:'public',table:'user_calendars',filter:'user_id=eq.'+user.id},payload=>{
+   if(payload.new&&payload.new.data){applyingRemote=true;items=payload.new.data;localStorage.setItem(STORE,JSON.stringify(items));render();applyingRemote=false;setStatus('Synced · Updated from another device')}
+  }).subscribe();
+ }catch(e){applyingRemote=false;setStatus('Could not sync: '+e.message)}
+}
+$('signInBtn').addEventListener('click',async()=>{const email=$('authEmail').value.trim(),password=$('authPassword').value;if(!email||!password){setStatus('Enter your email and password first.');return}setStatus('Logging in…');const {data,error}=await supabase.auth.signInWithPassword({email,password});if(error){setStatus(error.message);return}await syncCloud(data.user)});
+$('signUpBtn').addEventListener('click',async()=>{const email=$('authEmail').value.trim(),password=$('authPassword').value;if(!email||password.length<6){setStatus('Enter an email and a password with at least 6 characters.');return}setStatus('Creating your account…');const {data,error}=await supabase.auth.signUp({email,password});if(error){setStatus(error.message);return}if(data.session)await syncCloud(data.user);else setStatus('Account created. Check your email to confirm, then log in here.')});
+$('signOutBtn').addEventListener('click',async()=>{await supabase.auth.signOut();if(realtimeChannel)await supabase.removeChannel(realtimeChannel);currentUser=null;$('authEmail').hidden=false;$('authPassword').hidden=false;$('signInBtn').hidden=false;$('signUpBtn').hidden=false;$('signOutBtn').hidden=true;setStatus('Logged out · This device still has its local copy.')});
+supabase.auth.getSession().then(({data})=>{if(data.session)syncCloud(data.session.user)});
 function pad(n){return String(n).padStart(2,'0')}
 function key(d){return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`}
 function dateFromKey(s){const [y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d)}
